@@ -10,7 +10,17 @@ Key properties:
 
 - **Parallel** — workers run concurrently, one per CPU core by default
 - **Resumable** — atomic state files in `./migration_state/` record each worker's position; re-running the script skips already-completed work
-- **Zero code changes to VictoriaLogs** — uses the drop-in Elasticsearch Bulk API endpoint
+
+## Where to run the script
+
+Run the script **on or close to the VictoriaLogs host**. Parallelism is applied to the Elasticsearch side — each worker opens its own connection to ES and reads independently. The write path to VictoriaLogs is a single sequential POST per batch per worker, which is fast and rarely the bottleneck.
+
+```
+  [ES cluster]  ←── many parallel reads ───  [this script]  ──── bulk POST ────→  [VictoriaLogs]
+   (slow)                                     (run here)                            (fast)
+```
+
+> **Field observation:** Retrieval from ES can be significantly slower than ingestion into VictoriaLogs, regardless of the number of workers. The script works correctly, but overall migration speed is limited by how fast ES can serve `search_after` pages.
 
 ## Dependencies
 
