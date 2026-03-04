@@ -21,11 +21,13 @@ Key properties:
 | `date` (GNU coreutils) | Date arithmetic and ISO 8601 formatting |
 
 **Debian / Ubuntu:**
+
 ```bash
 sudo apt-get update && sudo apt-get install -y curl jq coreutils
 ```
 
 **CentOS / RHEL:**
+
 ```bash
 sudo yum install -y curl jq coreutils
 ```
@@ -39,26 +41,41 @@ sudo yum install -y curl jq coreutils
 git clone https://github.com/YOUR_USERNAME/elk_2_vlogs.git
 cd elk_2_vlogs
 
-# 2. Open the script and fill in the CONFIGURATION block
-$EDITOR elk_2_vlogs.sh
+# 2. Configure
+cp .env.example .env
+$EDITOR .env
 
-# 3. Make executable
+# 3. Make executable and run
 chmod +x elk_2_vlogs.sh
-
-# 4. Run
 ./elk_2_vlogs.sh
 ```
 
-## Configuration reference
+## Configuration
 
-All settings live in the `# --- CONFIGURATION ---` block near the top of `elk_2_vlogs.sh`.
+Settings are read from a `.env` file in the same directory as the script. A `.env.example` template with all available variables is included — copy it to `.env` and edit before running.
+
+The script loads `.env` automatically on startup. You can also override any variable inline:
+
+```bash
+ES_INDEX=logs-2025 MAX_WORKERS=16 ./elk_2_vlogs.sh
+```
+
+Priority order (highest to lowest):
+
+1. Variables set in the shell environment before running the script
+2. Variables set in `.env`
+3. Defaults baked into the script
+
+> **Security:** `.env` may contain credentials — add it to `.gitignore` and do not commit it.
+
+### Configuration reference
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ES_HOST` | `http://localhost:9200` | Elasticsearch base URL |
 | `ES_INDEX` | `your-index-name` | Index or data stream to read from |
-| `ES_USER` | *(unset)* | Elasticsearch username (optional) |
-| `ES_PASS` | *(unset)* | Elasticsearch password (optional) |
+| `ES_USER` | `elastic` | Elasticsearch username |
+| `ES_PASS` | `password` | Elasticsearch password |
 | `VL_HOST` | `http://localhost:9428` | VictoriaLogs base URL |
 | `START_DATE` | `2024-01-01T00:00:00.000Z` | Start of the migration window (ISO 8601) |
 | `END_DATE` | `2024-01-31T23:59:59.999Z` | End of the migration window (ISO 8601) |
@@ -67,9 +84,8 @@ All settings live in the `# --- CONFIGURATION ---` block near the top of `elk_2_
 | `PAGE_SIZE` | `1000` | Documents per Elasticsearch query |
 | `MAX_WORKERS` | `$(nproc)` | Number of parallel workers (defaults to CPU count) |
 | `STATE_DIR` | `./migration_state` | Directory for per-worker state files |
-| `VL_STREAM_FIELDS` | `fgt.vd,fgt.type,fgt.subtype,network.direction` | Comma-separated fields that form the VictoriaLogs log stream identity |
-| `VL_TIME_FIELD` | `@timestamp` | Field VictoriaLogs should use as the log timestamp |
-| `VL_MSG_FIELD` | `event.original` | Field VictoriaLogs should use as the human-readable log message |
+| `VL_STREAM_FIELDS` | *(unset)* | Comma-separated fields that form the VictoriaLogs log stream identity. If unset, the `VL-Stream-Fields` header is not sent and all logs go into a single default stream. |
+| `VL_MSG_FIELD` | *(unset)* | Field VictoriaLogs should use as the human-readable log message. If unset, VictoriaLogs falls back to its default (`_msg`). |
 | `VL_EXTRA_FIELDS` | *(unset)* | Additional `key=value` pairs to inject into every log entry |
 | `VL_ACCOUNT_ID` | *(unset)* | VictoriaLogs `AccountID` header for multi-tenancy |
 | `VL_PROJECT_ID` | *(unset)* | VictoriaLogs `ProjectID` header for multi-tenancy |
@@ -153,7 +169,3 @@ VictoriaLogs uses HTTP request headers to understand the structure of incoming b
 | `VL-Extra-Fields` | `VL_EXTRA_FIELDS` | Static `key=value` pairs appended to every log entry — useful for tagging migrated data (e.g. `source=migration`). |
 | `AccountID` | `VL_ACCOUNT_ID` | Multi-tenant account identifier (leave blank for single-tenant deployments). |
 | `ProjectID` | `VL_PROJECT_ID` | Multi-tenant project identifier (leave blank for single-tenant deployments). |
-
-## License
-
-MIT

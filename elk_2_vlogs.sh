@@ -30,62 +30,72 @@
 set -e
 set -o pipefail
 
+# Load environment variables from .env file if present (copy .env.example to .env to get started)
+if [ -f .env ]; then
+    set -a
+    source .env
+    set +a
+fi
+
 # --- CONFIGURATION ---
+# Each variable can be overridden by setting it in the environment before running
+# the script, e.g.: ES_HOST=http://es:9200 ./elk_2_vlogs.sh
 
 # Elasticsearch settings
-ES_HOST="http://localhost:9200"
-ES_INDEX="your-index-name"
-# Optional: Add Elasticsearch credentials if required
-# ES_USER="user"
-# ES_PASS="password"
+ES_HOST="${ES_HOST:-http://localhost:9200}"
+ES_INDEX="${ES_INDEX:-your-index-name}"
+ES_USER="${ES_USER:-elastic}"
+ES_PASS="${ES_PASS:-password}"
 
 # VictoriaLogs settings
-VL_HOST="http://localhost:9428"
+VL_HOST="${VL_HOST:-http://localhost:9428}"
 # The endpoint for VictoriaLogs that mimics the Elasticsearch Bulk API
 VL_BULK_ENDPOINT="${VL_HOST}/insert/elasticsearch/_bulk"
 
 # Time range for the export (ISO 8601 format)
 # IMPORTANT: Ensure your `date` command supports the `-d` option for parsing.
-START_DATE="2024-01-01T00:00:00.000Z"
-END_DATE="2024-01-31T23:59:59.999Z"
+START_DATE="${START_DATE:-2024-01-01T00:00:00.000Z}"
+END_DATE="${END_DATE:-2024-01-31T23:59:59.999Z}"
 
 # The field in your Elasticsearch documents that contains the timestamp.
-TIMESTAMP_FIELD="@timestamp"
+TIMESTAMP_FIELD="${TIMESTAMP_FIELD:-@timestamp}"
 
 # Sort order for the documents. Can be "asc" (ascending) or "desc" (descending).
-SORT_ORDER="asc"
+SORT_ORDER="${SORT_ORDER:-asc}"
 
 # Pagination settings for each worker
-PAGE_SIZE=1000
+PAGE_SIZE="${PAGE_SIZE:-1000}"
 
 # --- PARALLELISM AND STATE CONFIGURATION ---
 # Number of parallel workers to run, each processing a segment of the time range.
 # Defaults to the number of available CPU cores.
-if command -v nproc &> /dev/null; then
-    MAX_WORKERS=$(nproc)
-else
-    MAX_WORKERS=4 # Fallback if nproc is not available
+if [ -z "${MAX_WORKERS}" ]; then
+    if command -v nproc &> /dev/null; then
+        MAX_WORKERS=$(nproc)
+    else
+        MAX_WORKERS=4 # Fallback if nproc is not available
+    fi
 fi
 
 # Directory to store state files for resumable operation.
-STATE_DIR="./migration_state"
+STATE_DIR="${STATE_DIR:-./migration_state}"
 
 
 # VictoriaLogs Header Configuration
-VL_STREAM_FIELDS="fgt.vd,fgt.type,fgt.subtype,network.direction"
+VL_STREAM_FIELDS="${VL_STREAM_FIELDS:-}"
 VL_TIME_FIELD="${TIMESTAMP_FIELD}"
-VL_MSG_FIELD="event.original"
+VL_MSG_FIELD="${VL_MSG_FIELD:-}"
 # VL-Extra-Fields: Comma-separated list of key=value pairs to add to each log entry.
 # Example: "source=migration_script,env=production"
-VL_EXTRA_FIELDS=""
+VL_EXTRA_FIELDS="${VL_EXTRA_FIELDS:-}"
 
 # VictoriaLogs multi-tenancy headers (optional)
-VL_ACCOUNT_ID=""
-VL_PROJECT_ID=""
+VL_ACCOUNT_ID="${VL_ACCOUNT_ID:-}"
+VL_PROJECT_ID="${VL_PROJECT_ID:-}"
 
 # --- DEBUGGING ---
 # Set to "true" to enable verbose logging.
-DEBUG_MODE="false"
+DEBUG_MODE="${DEBUG_MODE:-false}"
 
 
 # --- SCRIPT LOGIC ---
