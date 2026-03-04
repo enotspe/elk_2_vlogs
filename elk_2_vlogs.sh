@@ -90,12 +90,19 @@ DEBUG_MODE="false"
 
 # --- SCRIPT LOGIC ---
 
+# Convert epoch milliseconds to ISO 8601 format (e.g. 2024-01-01T00:00:00.123Z)
+ms_to_iso8601() {
+    local ms=$1
+    printf '%s.%03dZ\n' "$(date -u -d "@$((ms / 1000))" +"%Y-%m-%dT%H:%M:%S")" "$((ms % 1000))"
+}
+
 # This function is the worker. It processes a single, dedicated time range.
 run_worker() {
     local worker_id=$1
     local worker_start_date=$2
     local worker_end_date=$3
     local state_file="${STATE_DIR}/worker_${worker_id}.state"
+    trap 'rm -f "${state_file}.tmp"' EXIT
 
     if [ "$DEBUG_MODE" = "true" ]; then
         set -x
@@ -124,42 +131,46 @@ run_worker() {
     local total_processed_by_worker=0
 
     # Check for a state file to resume from a previous run
-    if [ -f "$state_file" ]; then
-        search_after_value=$(cat "$state_file")
+    if search_after_value=$(cat "$state_file" 2>/dev/null); then
         echo "[Worker ${worker_id}]: Found state file. Resuming from progress: ${search_after_value}"
     fi
 
-    while true; do
-        local base_query
-        base_query=$(jq -n \
-            --argjson size "$PAGE_SIZE" \
-            --arg start_date "$worker_start_date" \
-            --arg end_date "$worker_end_date" \
-            --arg timestamp_field "$TIMESTAMP_FIELD" \
-            --arg sort_order "$SORT_ORDER" \
-            '{
-                "size": $size,
-                "query": { "range": { ($timestamp_field): { "gte": $start_date, "lte": $end_date, "format": "strict_date_optional_time" } } },
-                "sort": [ {($timestamp_field): $sort_order}, {"_shard_doc": $sort_order} ]
-            }')
+    # Build the base query once — all fields except search_after are constant for this worker
+    local base_query
+    base_query=$(jq -n \
+        --argjson size "$PAGE_SIZE" \
+        --arg start_date "$worker_start_date" \
+        --arg end_date "$worker_end_date" \
+        --arg timestamp_field "$TIMESTAMP_FIELD" \
+        --arg sort_order "$SORT_ORDER" \
+        '{
+            "size": $size,
+            "query": { "range": { ($timestamp_field): { "gte": $start_date, "lte": $end_date, "format": "strict_date_optional_time" } } },
+            "sort": [ {($timestamp_field): $sort_order}, {"_shard_doc": $sort_order} ]
+        }')
 
+    while true; do
         local query
         if [ -z "$search_after_value" ]; then
             query="$base_query"
         else
-            query=$(echo "$base_query" | jq --argjson search_after "$search_after_value" '. + {"search_after": $search_after}')
+            query=$(printf '%s' "$base_query" | jq --argjson search_after "$search_after_value" '. + {"search_after": $search_after}')
         fi
 
-        local es_start_time=$(date +%s%N)
-        local es_response
+        local es_start_time es_response es_end_time es_duration_ms
+        es_start_time=$(date +%s%N)
         es_response=$(curl "${worker_es_opts[@]}" "${ES_HOST}/${ES_INDEX}/_search" -d "${query}")
-        local es_end_time=$(date +%s%N)
-        local es_duration_ms=$(((es_end_time - es_start_time) / 1000000))
+        es_end_time=$(date +%s%N)
+        es_duration_ms=$(((es_end_time - es_start_time) / 1000000))
 
-        local hits
-        hits=$(echo "${es_response}" | jq -c '.hits.hits')
-        local hits_count
-        hits_count=$(echo "${hits}" | jq 'length')
+        # Parse hits count, next cursor, and progress timestamp in a single jq pass
+        local hits_count current_timestamp_ms
+        { read -r hits_count; read -r search_after_value; read -r current_timestamp_ms; } < <(
+            printf '%s' "${es_response}" | jq -r '
+                (.hits.hits | length),
+                (.hits.hits[-1].sort | tojson),
+                ((.hits.hits[-1].sort[0]) // "null")'
+        )
 
         echo "[Worker ${worker_id}]: Fetched ${hits_count} documents from ES in ${es_duration_ms}ms."
 
@@ -167,30 +178,27 @@ run_worker() {
             break # No more documents in this worker's time range
         fi
 
-        # Always update search_after_value for the next iteration from the last document received.
-        # We do this *before* sending to VictoriaLogs. If the send fails, the script will exit,
-        # and the next run will resume from this batch, effectively retrying the send.
-        search_after_value=$(echo "${es_response}" | jq -c '.hits.hits[-1].sort')
-        # Atomically write the new state to the state file
-        echo "${search_after_value}" > "${state_file}.tmp"
+        # Atomically write the new state to the state file.
+        # Done *before* sending to VictoriaLogs so a failed send retries from this batch on resume.
+        printf '%s\n' "${search_after_value}" > "${state_file}.tmp"
         mv "${state_file}.tmp" "${state_file}"
 
         local bulk_data
-        bulk_data=$(echo "${hits}" | jq -c '.[] | {"create": {}}, ._source')
+        bulk_data=$(printf '%s' "${es_response}" | jq -c '.hits.hits[] | {"create": {}}, ._source')
 
         # Only send data if the bulk payload was successfully created
         if [ -n "$bulk_data" ]; then
-            local vl_start_time=$(date +%s%N)
-            local vl_response
+            local vl_start_time vl_response vl_end_time vl_duration_ms
+            vl_start_time=$(date +%s%N)
             vl_response=$(curl "${worker_vl_opts[@]}" "${VL_BULK_ENDPOINT}" --data-binary @- <<< "${bulk_data}")
-            local vl_end_time=$(date +%s%N)
-            local vl_duration_ms=$(((vl_end_time - vl_start_time) / 1000000))
-            
+            vl_end_time=$(date +%s%N)
+            vl_duration_ms=$(((vl_end_time - vl_start_time) / 1000000))
+
             echo "[Worker ${worker_id}]: Sent ${hits_count} documents to VictoriaLogs in ${vl_duration_ms}ms."
 
-            if echo "${vl_response}" | jq -e '.errors == true' > /dev/null; then
+            if printf '%s' "${vl_response}" | jq -e '.errors == true' > /dev/null; then
                 echo "[Worker ${worker_id}]: Error: Ingesting data. Response:"
-                echo "${vl_response}"
+                printf '%s\n' "${vl_response}"
                 exit 1
             fi
             total_processed_by_worker=$((total_processed_by_worker + hits_count))
@@ -199,11 +207,9 @@ run_worker() {
         fi
 
         # Log the current progress timestamp for visibility
-        local current_timestamp_ms
-        current_timestamp_ms=$(echo "$search_after_value" | jq '.[0]')
         if [ -n "$current_timestamp_ms" ] && [ "$current_timestamp_ms" != "null" ]; then
-            local current_timestamp_s=$((current_timestamp_ms / 1000))
-            local human_readable_date
+            local current_timestamp_s human_readable_date
+            current_timestamp_s=$((current_timestamp_ms / 1000))
             human_readable_date=$(date -u -d "@${current_timestamp_s}" --iso-8601=seconds)
             echo "[Worker ${worker_id}]: Progress: [${worker_start_date} -> ${human_readable_date} -> ${worker_end_date}] (${search_after_value})"
         fi
@@ -260,8 +266,8 @@ for i in $(seq 1 "$MAX_WORKERS"); do
 
     # Convert epoch milliseconds back to ISO 8601 format with milliseconds for the worker
     # Example: 2024-01-01T00:00:00.123Z
-    worker_start_date=$(date -u -d "@$((${chunk_start_ms} / 1000))" +"%Y-%m-%dT%H:%M:%S").$(printf "%03d" $((${chunk_start_ms} % 1000)))Z
-    worker_end_date=$(date -u -d "@$((${chunk_end_ms} / 1000))" +"%Y-%m-%dT%H:%M:%S").$(printf "%03d" $((${chunk_end_ms} % 1000)))Z
+    worker_start_date=$(ms_to_iso8601 "$chunk_start_ms")
+    worker_end_date=$(ms_to_iso8601 "$chunk_end_ms")
     
     # Launch the worker process in the background
     run_worker "$i" "$worker_start_date" "$worker_end_date" &
